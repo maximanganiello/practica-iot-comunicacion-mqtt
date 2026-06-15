@@ -20,8 +20,8 @@ el broker HiveMQ.
 #include <PubSubClient.h>
 
 // Credenciales de la red WiFi
-const char *ssid = "Machucai";
-const char *password = "42497163";
+const char *ssid = "Nombre-WiFi";
+const char *password = "Contraseña";
 
 // Dirección del broker MQTT
 const char *mqtt_server = "broker.hivemq.com";
