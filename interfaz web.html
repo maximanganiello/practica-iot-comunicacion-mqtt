@@ -1,0 +1,367 @@
+<!--
+Nombre del proyecto: Interfaz web para sistema IoT con comunicación MQTT
+Autor: Manganiello Maximiliano
+Fecha: 14/06/2026
+
+Descripción:
+Este archivo implementa una interfaz web desarrollada en HTML,
+CSS y JavaScript para la interacción con un dispositivo IoT
+basado en ESP32.
+
+La aplicación establece una conexión con un broker MQTT mediante
+WebSocket utilizando la biblioteca MQTT.js. A través de la interfaz
+es posible visualizar las lecturas del joystick, controlar un LED
+RGB y participar en un sistema de chat entre los distintos clientes
+conectados al broker.
+
+La comunicación se realiza mediante el protocolo MQTT utilizando
+el broker HiveMQ.
+-->
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Panel MQTT IoT</title>
+
+  <!-- Librería MQTT.js para conectarse al broker desde el navegador (vía WebSocket) -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+  <style>
+    /* ESTILOS GENERALES */
+
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+    }
+
+    /* Tarjeta genérica usada para agrupar secciones (config, sensores, consola, etc.) */
+    .card {
+      background: white;
+      border-radius: 10px;
+      padding: 15px;
+      margin-bottom: 15px;
+      box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+    }
+
+    /* Contenedor en fila para mostrar dos tarjetas lado a lado */
+    .row {
+      display: flex;
+      gap: 15px;
+    }
+
+    /* Cada tarjeta dentro de .row ocupa el mismo espacio */
+    .half {
+      flex: 1;
+    }
+
+    h2 {
+      margin-top: 0;
+    }
+
+    input {
+      padding: 8px;
+      margin: 5px;
+    }
+
+    button {
+      padding: 10px;
+      cursor: pointer;
+    }
+
+    /* CONSOLA DE MENSAJES MQTT */
+
+    #console {
+      height: 300px;
+      overflow-y: auto;
+      background: black;
+      color: #00ff00;
+      padding: 10px;
+      font-family: Consolas, monospace;
+    }
+
+    /* BOTONES DEL LED RGB (círculos de color) */
+
+    .rgb-btn {
+      width: 60px;
+      height: 60px;
+      border: none;
+      border-radius: 50%;
+      margin: 5px;
+      cursor: pointer;
+    }
+
+    .red   { background: red; }
+    .green { background: green; }
+    .blue  { background: blue; }
+    .white { background: white; border: 1px solid black; }
+    .black { background: black; }
+
+    /* ESTADOS DE CONEXIÓN (texto de estado MQTT) */
+
+    .connected {
+      color: green;
+      font-weight: bold;
+    }
+
+    .disconnected {
+      color: red;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- SECCIÓN 1: CONFIGURACIÓN MQTT (broker, puerto, conectar) -->
+  <div class="card">
+    <h2>Configuración MQTT</h2>
+
+    Broker:
+    <input id="broker" value="broker.hivemq.com">
+
+    Puerto:
+    <input id="port" value="8000">
+
+    <!-- Al hacer click llama a conectar() definida en el <script> -->
+    <button onclick="conectar()">
+      Conectar
+    </button>
+
+    <br><br>
+
+    <!-- Indicador visual del estado de la conexión (se actualiza desde JS) -->
+    Estado:
+    <span id="status" class="disconnected">
+      🔴 Desconectado
+    </span>
+  </div>
+
+  <!-- SECCIÓN 2: SENSORES Y ACTUADOR (en fila) -->
+  <div class="row">
+
+    <!-- ---- Sensores: muestra valores recibidos del joystick ---- -->
+    <div class="card half">
+      <h2>Sensores (Joystick)</h2>
+
+      <p>X: <span id="x">-</span></p>
+      <p>Y: <span id="y">-</span></p>
+      <p>SW: <span id="sw">-</span></p>
+    </div>
+
+    <!-- ---- Actuador: botones para controlar el LED RGB ---- -->
+    <div class="card half">
+      <h2>Actuador (Led RGB)</h2>
+
+      <button class="rgb-btn red"   onclick="enviarRGB('RED')"></button>
+      <button class="rgb-btn green" onclick="enviarRGB('GREEN')"></button>
+      <button class="rgb-btn blue"  onclick="enviarRGB('BLUE')"></button>
+      <button class="rgb-btn white" onclick="enviarRGB('WHITE')"></button>
+      <button class="rgb-btn black" onclick="enviarRGB('OFF')"></button>
+    </div>
+
+  </div>
+
+  <!-- SECCIÓN 3: CONSOLA MQTT (log + envío de comandos) -->
+  <div class="card">
+    <h2>Consola MQTT</h2>
+
+    <!-- Acá se van agregando los mensajes recibidos/enviados -->
+    <div id="console"></div>
+
+    <br>
+
+    <!-- Campo para escribir comandos o mensajes de chat -->
+    <input id="command" style="width:80%;" placeholder="Escriba un mensaje o comando">
+
+    <button onclick="enviarComando()">
+      Enviar
+    </button>
+  </div>
+
+  <script>
+
+    // Referencia al cliente MQTT. Empieza en null hasta que se llama a conectar()
+    let client = null;
+
+    // TOPICS (canales MQTT usados por la app)
+
+    const TOPIC_X    = "iot/maxi2026/joystick/x";   // valor X del joystick
+    const TOPIC_Y    = "iot/maxi2026/joystick/y";   // valor Y del joystick
+    const TOPIC_SW   = "iot/maxi2026/joystick/sw";  // estado del botón del joystick
+    const TOPIC_RGB  = "iot/maxi2026/rgb";          // comandos para el LED RGB
+    const TOPIC_CHAT = "iot/maxi2026/chat";         // canal de "chat" / mensajes
+
+    // FUNCIÓN: log
+    // Escribe una línea con timestamp en la consola visual (#console)
+    function log(texto) {
+      const consola = document.getElementById("console");
+      const hora = new Date().toLocaleTimeString();
+
+      consola.innerHTML += `[${hora}] ${texto}<br>`;
+
+      // Hace scroll automático hacia el final para ver siempre el último mensaje
+      consola.scrollTop = consola.scrollHeight;
+    }
+
+    // FUNCIÓN: conectar
+    // Se ejecuta al hacer click en "Conectar".
+    // Toma broker/puerto del formulario, abre la conexión MQTT por WebSocket
+    // y define todos los listeners de eventos del cliente.
+    function conectar() {
+
+      const broker = document.getElementById("broker").value;
+      const port = document.getElementById("port").value;
+
+      // URL de conexión por WebSocket (protocolo "ws")
+      const url = `ws://${broker}:${port}/mqtt`;
+
+      log("Conectando a " + url);
+
+      // Crea el cliente y abre la conexión
+      client = mqtt.connect(url);
+
+      // --- Evento: conexión establecida con éxito ---
+      client.on('connect', () => {
+        document.getElementById("status").innerHTML = "🟢 Conectado";
+        document.getElementById("status").className = "connected";
+
+        log("Conectado");
+
+        // Se suscribe a los topics que quiere "escuchar"
+        client.subscribe(TOPIC_X);
+        client.subscribe(TOPIC_Y);
+        client.subscribe(TOPIC_SW);
+        client.subscribe(TOPIC_CHAT);
+      });
+
+      // --- Evento: el cliente quedó sin conexión (broker caído, sin red, etc.) ---
+      client.on('offline', () => {
+        document.getElementById("status").innerHTML = "🟠 Sin conexión";
+        document.getElementById("status").className = "disconnected";
+
+        log("Broker fuera de línea");
+      });
+
+      // --- Evento: error en la conexión MQTT ---
+      client.on('error', (err) => {
+        document.getElementById("status").innerHTML = "🔴 Error MQTT";
+        document.getElementById("status").className = "disconnected";
+
+        log("Error MQTT: " + err.message);
+      });
+
+      // --- Evento: la conexión se cerró ---
+      client.on('close', () => {
+        document.getElementById("status").innerHTML = "🔴 Desconectado";
+        document.getElementById("status").className = "disconnected";
+
+        log("Desconectado");
+      });
+
+      // --- Evento: intentando reconectar automáticamente ---
+      client.on('reconnect', () => {
+        log("Reconectando...");
+      });
+
+      // --- Evento: llegó un mensaje de algún topic suscripto ---
+      client.on('message', (topic, message) => {
+        const valor = message.toString();
+
+        if (topic === TOPIC_X) {
+          // Actualiza el valor X del joystick en pantalla
+          document.getElementById("x").innerText = valor;
+
+        } else if (topic === TOPIC_Y) {
+          // Actualiza el valor Y del joystick en pantalla
+          document.getElementById("y").innerText = valor;
+
+        } else if (topic === TOPIC_SW) {
+          // Actualiza el estado del botón (switch) del joystick
+          document.getElementById("sw").innerText = valor;
+
+        } else if (topic === TOPIC_CHAT) {
+          // Filtra mensajes "internos" que no deben mostrarse en la consola
+          if (
+            valor === "X" ||
+            valor === "Y" ||
+            valor === "SW" ||
+            valor === "JOY"
+          ) {
+            return;
+          }
+
+          // Cualquier otro mensaje de chat se muestra en la consola
+          log(valor);
+        }
+      });
+    }
+
+    // FUNCIÓN: enviarRGB
+    // Publica un comando de color en TOPIC_RGB (usado por los botones circulares)
+    function enviarRGB(color) {
+      if (!client) return; // si todavía no se conectó, no hace nada
+
+      client.publish(TOPIC_RGB, color);
+
+      log(`RGB -> ${color}`);
+    }
+
+    // FUNCIÓN: enviarComando
+    // Se ejecuta al hacer click en "Enviar" (o presionar Enter).
+    // Interpreta el texto ingresado y decide a qué topic publicarlo:
+    //  - Si es un color válido (RED/GREEN/BLUE/WHITE/OFF) -> TOPIC_RGB
+    //  - Si es X/Y/SW/JOY -> TOPIC_CHAT (como "comando" de lectura)
+    //  - Cualquier otro texto -> TOPIC_CHAT como mensaje libre ("WEB: ...")
+
+    function enviarComando() {
+      if (!client) return;
+
+      const input = document.getElementById("command");
+
+      let texto = input.value.trim();
+
+      if (texto === "") return; // ignora envíos vacíos
+
+      const cmd = texto.toUpperCase();
+
+      if (
+        cmd === "RED" ||
+        cmd === "GREEN" ||
+        cmd === "BLUE" ||
+        cmd === "WHITE" ||
+        cmd === "OFF"
+      ) {
+        // Comando de color -> controla el LED RGB
+        client.publish(TOPIC_RGB, cmd);
+        log(`RGB -> ${cmd}`);
+
+      } else if (
+        cmd === "X" ||
+        cmd === "Y" ||
+        cmd === "SW" ||
+        cmd === "JOY"
+      ) {
+        // Comando de lectura de sensores -> se publica en el chat
+        client.publish(TOPIC_CHAT, cmd);
+        log(`Joystick -> ${cmd}`);
+
+      } else {
+        // Texto libre -> se envía como mensaje de chat con prefijo "WEB:"
+        client.publish(TOPIC_CHAT, "WEB: " + texto);
+      }
+
+      input.value = ""; // limpia el campo de texto
+    }
+
+    // EVENTO: permite enviar el comando presionando "Enter"
+    // dentro del campo de texto (#command)
+    document.getElementById("command").addEventListener("keypress", function (e) {
+      if (e.key === "Enter") enviarComando();
+    });
+
+  </script>
+
+</body>
+</html>
